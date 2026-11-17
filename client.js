@@ -397,7 +397,21 @@ window.__ModuleLoader__.load({
 
       return h(
         'div',
-        { style: { padding: 16, maxWidth: 860, margin: '0 auto', color: C.label1 } },
+        {
+          style: {
+            display: 'flex',
+            flexDirection: 'column',
+            height: '100%',
+            minHeight: 0,
+            boxSizing: 'border-box',
+            overflow: 'hidden',
+            background: C.bg,
+            color: C.label1,
+            fontFamily: 'inherit',
+          },
+        },
+        /* ---- 固定头部：不随列表滚动 ---- */
+        h('div', { style: { flex: '0 0 auto', padding: '16px 16px 8px', width: '100%', maxWidth: 860, margin: '0 auto', boxSizing: 'border-box' } },
         /* header */
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' } },
           h('div', { style: { flex: 1 } },
@@ -426,15 +440,16 @@ window.__ModuleLoader__.load({
           }, t('archived') + ' (' + archived.length + ')'),
         ),
 
-        /* search */
-        h('div', { style: { marginBottom: 8 } },
+        /* search + subagent toggle（同一行，省高度） */
+        h('div', { style: { display: 'flex', gap: 10, marginBottom: 8, alignItems: 'center' } },
           h('input', {
             type: 'search',
             value: query,
             placeholder: t('searchPlaceholder'),
             onChange: (e) => setQuery(e.target.value),
             style: {
-              width: '100%',
+              flex: '1 1 auto',
+              minWidth: 0,
               boxSizing: 'border-box',
               padding: '7px 10px',
               fontSize: 13,
@@ -445,12 +460,10 @@ window.__ModuleLoader__.load({
               outline: 'none',
             },
           }),
-        ),
-
-        /* subagent visibility toggle */
-        h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, fontSize: 12, color: C.label2, cursor: 'pointer' } },
-          h('input', { type: 'checkbox', checked: showSub, onChange: (e) => setShowSub(e.target.checked), style: { cursor: 'pointer' } }),
-          t('showSub') + (showSub ? '' : ' (' + hiddenSubCount + ' ' + t('subagent') + ')'),
+          h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.label2, cursor: 'pointer', whiteSpace: 'nowrap' } },
+            h('input', { type: 'checkbox', checked: showSub, onChange: (e) => setShowSub(e.target.checked), style: { cursor: 'pointer' } }),
+            t('showSub') + (showSub ? '' : ' (' + hiddenSubCount + ')'),
+          ),
         ),
 
         /* toolbar for sessions view */
@@ -473,6 +486,22 @@ window.__ModuleLoader__.load({
           ? h('div', { style: { fontSize: 11, color: C.error, marginBottom: 8 } }, '⚠ ' + t('irrecoverable'))
           : null,
 
+        ),
+
+        /* ---- 可滚动列表区 ---- */
+        h('div', {
+          style: {
+            flex: '1 1 auto',
+            minHeight: 0,
+            overflowY: 'auto',
+            overflowX: 'hidden',
+            padding: '0 16px 16px',
+            width: '100%',
+            maxWidth: 860,
+            margin: '0 auto',
+            boxSizing: 'border-box',
+          },
+        },
         /* list */
         h('div', { style: { border: '1px solid ' + C.border1, borderRadius: 8, overflow: 'hidden' } },
           view === 'sessions'
@@ -490,6 +519,7 @@ window.__ModuleLoader__.load({
               : visibleArchived.length === 0
                 ? h('div', { style: { padding: 24, textAlign: 'center', color: C.label2, fontSize: 12 } }, t('noMatch'))
                 : visibleArchived.map(renderArchivedRow),
+        ),
         ),
       );
     }
