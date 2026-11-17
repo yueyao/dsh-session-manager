@@ -11,8 +11,13 @@ workflow.
 
 ## Features
 
-- **Enumerate** every history session across all working directories, with
-  working-directory, last-updated time and on-disk size.
+- **Session titles** — each row shows the human-readable title DSH gave the
+  session (read from the `session/title` event inside the log), with the real
+  working directory, origin, last-updated time and log size.
+- **Search** — filter by title, working directory or id.
+- **Subagent filter** — subagent sessions are hidden by default; toggle them
+  back on when you need them.
+- **Enumerate** every history session across all working directories.
 - **Multi-select** sessions in the sidebar panel and batch-operate.
 - **Archive** — move sessions out of the active list into a global
   `DSH_HOME/archive/sessions/` directory. Data is preserved verbatim and can be
@@ -21,6 +26,24 @@ workflow.
   in the UI and confirmed before running.
 - **Restore** — bring archived sessions back to their original working
   directory.
+
+## How titles and paths are read
+
+A session log is a run of concatenated zstd frames, one per append, so
+`zlib.zstdDecompressSync` alone stops after the first frame. The plugin locates
+every frame by its `28 B5 2F FD` magic bytes and inflates each slice. It then
+reads:
+
+- frame 0 — the `session` header, which carries the **real, unencoded `cwd`**
+  (the directory name alone is lossy: both `/` and a literal `-` encode to `-`);
+- the head frames — the first `session/title` event (measured: always within the
+  first six frames);
+- the tail frames — any later `session/title` events, i.e. renames (measured:
+  always within the last sixty frames).
+
+The highest `seq` wins. Results are cached per session and invalidated by the
+log's mtime and size, so listing 170 sessions costs a few milliseconds after the
+first scan.
 
 ## Install
 

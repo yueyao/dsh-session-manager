@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-manager",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "type": "module",
   "description": "Batch browse, archive and delete DSH history sessions from a sidebar panel.",
@@ -16,7 +16,9 @@
     "cordis.patch.yml",
     "locale/*.json",
     "assets/icon.svg",
-    "README.md"
+    "assets/icon-180.png",
+    "README.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {

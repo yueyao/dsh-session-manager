@@ -213,6 +213,8 @@ window.__ModuleLoader__.load({
       const [selArchived, setSelArchived] = useState({});
       const [view, setView] = useState('sessions'); // 'sessions' | 'archived'
       const [errorMsg, setErrorMsg] = useState('');
+      const [query, setQuery] = useState('');
+      const [showSub, setShowSub] = useState(false);
 
       async function load() {
         try {
@@ -235,6 +237,18 @@ window.__ModuleLoader__.load({
       const sessions = (state && state.sessions) || [];
       const archived = (state && state.archived) || [];
 
+      const needle = query.trim().toLowerCase();
+      const matches = (item) => {
+        // Subagent sessions are internal workers — hide them unless asked for.
+        if (!showSub && item.origin === 'subagent') return false;
+        if (needle === '') return true;
+        const hay = [item.title, item.cwd, item.id, item.origin].filter(Boolean).join(' ').toLowerCase();
+        return hay.indexOf(needle) >= 0;
+      };
+      const visibleSessions = sessions.filter(matches);
+      const visibleArchived = archived.filter(matches);
+      const hiddenSubCount = sessions.filter((s) => s.origin === 'subagent').length;
+
       const toggleSession = (id) => {
         setSelSessions((prev) => {
           const next = Object.assign({}, prev);
@@ -255,12 +269,12 @@ window.__ModuleLoader__.load({
       const selCount = Object.keys(selSessions).length;
       const selArchCount = Object.keys(selArchived).length;
 
-      const allSelected = sessions.length > 0 && selCount === sessions.length;
+      const allSelected = visibleSessions.length > 0 && visibleSessions.every((s) => selSessions[s.id]);
       const toggleAll = () => {
         if (allSelected) setSelSessions({});
         else {
           const next = {};
-          for (const s of sessions) next[s.id] = true;
+          for (const s of visibleSessions) next[s.id] = true;
           setSelSessions(next);
         }
       };
@@ -336,14 +350,17 @@ window.__ModuleLoader__.load({
       /* ---------- render sessions list ---------- */
       function renderSessionRow(s) {
         const running = !!s.running;
+        const label = s.title || t('untitled');
+        const meta = [s.cwd || '—', shortId(s.id)];
+        if (s.origin) meta.push(s.origin);
         return h(
           'div',
           { key: s.id, style: rowStyle(running) },
-          checkbox(!!selSessions[s.id], () => toggleSession(s.id), s.id),
+          checkbox(!!selSessions[s.id], () => toggleSession(s.id), label),
           h('div', { style: { flex: 1, minWidth: 0 } },
-            h('div', { style: { fontSize: 13, color: C.label1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, shortId(s.id)),
+            h('div', { style: { fontSize: 13, fontWeight: 500, color: C.label1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, label),
             h('div', { style: { fontSize: 11, color: C.label2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-              t('cwd') + ': ' + (s.cwd || '—')),
+              meta.join(' · ')),
           ),
           h('div', { style: { fontSize: 11, color: C.label2, textAlign: 'right', whiteSpace: 'nowrap' } },
             fmtDate(s.updatedAt),
@@ -354,14 +371,16 @@ window.__ModuleLoader__.load({
       }
 
       function renderArchivedRow(a) {
+        const label = a.title || t('untitled');
+        const meta = [a.cwd || '—', shortId(a.id)];
         return h(
           'div',
           { key: a.id, style: rowStyle(false) },
-          checkbox(!!selArchived[a.id], () => toggleArchived(a.id), a.id),
+          checkbox(!!selArchived[a.id], () => toggleArchived(a.id), label),
           h('div', { style: { flex: 1, minWidth: 0 } },
-            h('div', { style: { fontSize: 13, color: C.label1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, shortId(a.id)),
+            h('div', { style: { fontSize: 13, fontWeight: 500, color: C.label1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, label),
             h('div', { style: { fontSize: 11, color: C.label2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-              t('cwd') + ': ' + (a.cwd || '—')),
+              meta.join(' · ')),
           ),
           h('div', { style: { fontSize: 11, color: C.label2, textAlign: 'right', whiteSpace: 'nowrap' } },
             fmtDate(a.archivedAt),
@@ -406,6 +425,33 @@ window.__ModuleLoader__.load({
           }, t('archived') + ' (' + archived.length + ')'),
         ),
 
+        /* search */
+        h('div', { style: { marginBottom: 8 } },
+          h('input', {
+            type: 'search',
+            value: query,
+            placeholder: t('searchPlaceholder'),
+            onChange: (e) => setQuery(e.target.value),
+            style: {
+              width: '100%',
+              boxSizing: 'border-box',
+              padding: '7px 10px',
+              fontSize: 13,
+              color: C.label1,
+              background: C.layer1,
+              border: '1px solid ' + C.border2,
+              borderRadius: 6,
+              outline: 'none',
+            },
+          }),
+        ),
+
+        /* subagent visibility toggle */
+        h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, fontSize: 12, color: C.label2, cursor: 'pointer' } },
+          h('input', { type: 'checkbox', checked: showSub, onChange: (e) => setShowSub(e.target.checked), style: { cursor: 'pointer' } }),
+          t('showSub') + (showSub ? '' : ' (' + hiddenSubCount + ' ' + t('subagent') + ')'),
+        ),
+
         /* toolbar for sessions view */
         view === 'sessions'
           ? h('div', { style: { display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center', flexWrap: 'wrap' } },
@@ -433,12 +479,16 @@ window.__ModuleLoader__.load({
               ? h('div', { style: { padding: 24, textAlign: 'center', color: C.label2 } },
                   h('div', { style: { fontSize: 14, color: C.label1, marginBottom: 6 } }, t('empty')),
                   h('div', { style: { fontSize: 12 } }, t('emptyHint')))
-              : sessions.map(renderSessionRow)
+              : visibleSessions.length === 0
+                ? h('div', { style: { padding: 24, textAlign: 'center', color: C.label2, fontSize: 12 } }, t('noMatch'))
+                : visibleSessions.map(renderSessionRow)
             : archived.length === 0
               ? h('div', { style: { padding: 24, textAlign: 'center', color: C.label2 } },
                   h('div', { style: { fontSize: 14, color: C.label1, marginBottom: 6 } }, t('emptyArchived')),
                   h('div', { style: { fontSize: 12 } }, t('emptyArchivedHint')))
-              : archived.map(renderArchivedRow),
+              : visibleArchived.length === 0
+                ? h('div', { style: { padding: 24, textAlign: 'center', color: C.label2, fontSize: 12 } }, t('noMatch'))
+                : visibleArchived.map(renderArchivedRow),
         ),
       );
     }

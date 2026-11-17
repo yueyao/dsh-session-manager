@@ -26,6 +26,7 @@ import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
+import zlib from 'node:zlib'
 
 export const name = 'dsh-session-manager'
 export const inject = ['tools', 'webServer', 'connection']
@@ -125,24 +126,199 @@ function archiveIndexPath() {
 
 /**
  * Decode a <cwd-encoded> directory name back into a best-effort working
- * directory path. The harness encodes `/` as `-` and non-ASCII as `~XXXX~`.
- * Because the encoding is lossy (a literal `-` in the path is ambiguous with
- * a separator), this is only used for display — operations act on the encoded
- * directory names directly and never on decoded paths.
+ * directory path. The harness encodes `/` as `-` and non-ASCII/special code
+ * units as `~XXXX` (a tilde PREFIX plus four uppercase hex digits, with no
+ * trailing tilde — e.g. `~51FA` -> 出, `~0020` -> space). Absolute paths are
+ * wrapped in a leading and trailing `--` (the empty segments around the
+ * leading/trailing `/`).
+ *
+ * The encoding is lossy: a literal `-` inside a path segment (e.g. `my-jarvis`)
+ * is ambiguous with the `/` separator, so decoded paths are display-only.
+ * Operations always act on the encoded directory names directly.
  */
 function decodeCwd(encoded) {
+  if (typeof encoded !== 'string') return ''
   let text = encoded
-  // Hex-escaped Unicode (e.g. ~51FA~ -> 出) first, then the `-` → `/` mapping.
-  text = text.replace(/~([0-9A-Fa-f]{4})~/g, (_, hex) => {
+  // Hex-escaped code units (`~XXXX`) first, then the `-` -> `/` mapping.
+  text = text.replace(/~([0-9A-Fa-f]{4})/g, (_, hex) => {
     try {
       return String.fromCodePoint(parseInt(hex, 16))
     } catch {
       return _
     }
   })
-  // A leading `--` marks the absolute-path form (e.g. `--Users-...`); the
-  // first two dashes represent the empty segment before the leading `/`.
-  return text.replace(/-/g, '/')
+  // Absolute paths are `--<segments>--`; drop those wrappers, re-add one
+  // leading `/`, and map the remaining `-` separators to `/`.
+  let body = text
+  let leading = ''
+  if (body.startsWith('--')) {
+    leading = '/'
+    body = body.slice(2)
+  }
+  if (body.endsWith('--')) {
+    body = body.slice(0, -2)
+  }
+  return leading + body.replace(/-/g, '/')
+}
+
+/* ------------------------------------------------------------------ */
+/* session event-log metadata (title + real cwd)                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The session log is a run of concatenated zstd frames (one per append), not a
+ * single zstd stream. Node's `zstdDecompressSync` stops after the first frame,
+ * so we locate every frame by its magic bytes and inflate each slice.
+ */
+const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+
+/** Head frames scanned: 100% of first titles land at frame <= 5 (measured). */
+const META_HEAD_FRAMES = 12
+/** Tail frames scanned: every rename observed sits inside the last 60 frames. */
+const META_TAIL_FRAMES = 60
+/** Fallback title length cap when deriving one from the first user message. */
+const TITLE_FALLBACK_CHARS = 48
+
+/** dirPath -> { mtimeMs, size, meta } so polling stays cheap. */
+const metaCache = new Map()
+
+function zstdFrameOffsets(buf) {
+  const offsets = []
+  let pos = 0
+  for (;;) {
+    const found = buf.indexOf(ZSTD_MAGIC, pos)
+    if (found < 0) break
+    offsets.push(found)
+    pos = found + ZSTD_MAGIC.length
+  }
+  return offsets
+}
+
+function inflateFrame(buf, start, end) {
+  try {
+    return zlib.zstdDecompressSync(buf.subarray(start, end)).toString('utf8')
+  } catch {
+    return ''
+  }
+}
+
+/** Pull text/content out of a user message event, best effort. */
+function userMessageText(evt) {
+  const data = evt && evt.data
+  if (!isPlainObject(data)) return ''
+  const blocks = data.content
+  if (Array.isArray(blocks)) {
+    const parts = []
+    for (const block of blocks) {
+      if (typeof block === 'string') parts.push(block)
+      else if (isPlainObject(block) && typeof block.text === 'string') parts.push(block.text)
+    }
+    if (parts.length > 0) return parts.join(' ')
+  }
+  if (typeof data.text === 'string') return data.text
+  return ''
+}
+
+/**
+ * Read the human-facing metadata of one session directory:
+ * title, real (unencoded) cwd, createdAt, origin and parent session.
+ *
+ * Titles live in `session/title` events; renames append a new event with a
+ * larger `seq`, so the highest-seq title among the head and tail windows wins.
+ */
+async function readSessionMeta(dirPath, dataStat) {
+  const cached = metaCache.get(dirPath)
+  if (cached && cached.mtimeMs === dataStat.mtimeMs && cached.size === dataStat.size) {
+    return cached.meta
+  }
+
+  const meta = {
+    title: '',
+    titleSource: '',
+    cwd: '',
+    createdAt: '',
+    origin: '',
+    parentSession: '',
+  }
+
+  let buf
+  try {
+    buf = await fsp.readFile(path.join(dirPath, 'session.v4.jsonl.zstd'))
+  } catch {
+    metaCache.set(dirPath, { mtimeMs: dataStat.mtimeMs, size: dataStat.size, meta })
+    return meta
+  }
+
+  const offsets = zstdFrameOffsets(buf)
+  if (offsets.length === 0) {
+    metaCache.set(dirPath, { mtimeMs: dataStat.mtimeMs, size: dataStat.size, meta })
+    return meta
+  }
+
+  const frameEnd = (k) => (k + 1 < offsets.length ? offsets[k + 1] : buf.length)
+  let titleSeq = -1
+  let firstUserText = ''
+
+  const absorb = (text) => {
+    for (const line of text.split('\n')) {
+      if (line === '') continue
+      let evt
+      try {
+        evt = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (evt.type === 'session' && meta.cwd === '') {
+        if (typeof evt.cwd === 'string') meta.cwd = evt.cwd
+        if (typeof evt.createdAt === 'number') meta.createdAt = new Date(evt.createdAt).toISOString()
+        if (typeof evt.origin === 'string') meta.origin = evt.origin
+        if (typeof evt.parentSession === 'string') meta.parentSession = evt.parentSession
+      } else if (evt.type === 'session/title') {
+        const data = isPlainObject(evt.data) ? evt.data : {}
+        const title = typeof data.title === 'string' ? data.title.trim() : ''
+        const seq = typeof evt.seq === 'number' ? evt.seq : 0
+        if (title !== '' && seq > titleSeq) {
+          titleSeq = seq
+          meta.title = title
+          meta.titleSource = isPlainObject(data.source) && typeof data.source.kind === 'string' ? data.source.kind : ''
+        }
+      } else if (evt.type === 'user/message' && firstUserText === '') {
+        firstUserText = userMessageText(evt).trim()
+      }
+    }
+  }
+
+  const headLimit = Math.min(META_HEAD_FRAMES, offsets.length)
+  for (let k = 0; k < headLimit; k++) absorb(inflateFrame(buf, offsets[k], frameEnd(k)))
+
+  // Renames append near the end of long, ongoing sessions.
+  const tailStart = Math.max(headLimit, offsets.length - META_TAIL_FRAMES)
+  for (let k = tailStart; k < offsets.length; k++) absorb(inflateFrame(buf, offsets[k], frameEnd(k)))
+
+  // Untitled (aborted) sessions: derive a readable label from the first prompt.
+  if (meta.title === '' && firstUserText !== '') {
+    const flat = firstUserText.replace(/\s+/g, ' ').trim()
+    meta.title = flat.length > TITLE_FALLBACK_CHARS ? `${flat.slice(0, TITLE_FALLBACK_CHARS)}…` : flat
+    meta.titleSource = 'derived'
+  }
+
+  metaCache.set(dirPath, { mtimeMs: dataStat.mtimeMs, size: dataStat.size, meta })
+  return meta
+}
+
+/** Run `worker` over `items` with bounded concurrency, preserving order. */
+async function mapLimit(items, limit, worker) {
+  const results = new Array(items.length)
+  let cursor = 0
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const index = cursor++
+      if (index >= items.length) return
+      results[index] = await worker(items[index], index)
+    }
+  })
+  await Promise.all(runners)
+  return results
 }
 
 /**
@@ -223,13 +399,22 @@ async function writeArchiveIndex(entries) {
 /* session model                                                       */
 /* ------------------------------------------------------------------ */
 
-function sessionMetaFromDir(cwdName, sessionId, dirPath, stat) {
+function sessionMetaFromDir(cwdName, sessionId, dirPath, stat, extra) {
+  const meta = isPlainObject(extra) ? extra : {}
   return {
     id: sessionId,
-    cwd: decodeCwd(cwdName),
+    title: typeof meta.title === 'string' ? meta.title : '',
+    titleSource: typeof meta.titleSource === 'string' ? meta.titleSource : '',
+    // The session header carries the real, unencoded cwd — prefer it and keep
+    // the lossy directory decode only as a fallback.
+    cwd: typeof meta.cwd === 'string' && meta.cwd !== '' ? meta.cwd : decodeCwd(cwdName),
     cwdEncoded: cwdName,
+    createdAt: typeof meta.createdAt === 'string' ? meta.createdAt : '',
+    origin: typeof meta.origin === 'string' ? meta.origin : '',
+    parentSession: typeof meta.parentSession === 'string' ? meta.parentSession : '',
     updatedAt: stat.mtime.toISOString(),
-    sizeBytes: stat.size,
+    // Prefer the event-log size; a directory's own size (~128 B) says nothing.
+    sizeBytes: typeof meta.sizeBytes === 'number' ? meta.sizeBytes : stat.size,
     running: false,
   }
 }
@@ -314,13 +499,16 @@ function createStore(ctx) {
 
   async function enumerate() {
     const root = sessionsRoot()
-    const out = []
     let cwdEntries
     try {
       cwdEntries = await fsp.readdir(root, { withFileTypes: true })
     } catch {
-      return out
+      return []
     }
+
+    // Directory listings are cheap; collect every session dir up front so the
+    // (much heavier) per-session log reads can run concurrently.
+    const dirs = []
     for (const cwdEntry of cwdEntries) {
       if (!cwdEntry.isDirectory()) continue
       const cwdDir = path.join(root, cwdEntry.name)
@@ -332,18 +520,36 @@ function createStore(ctx) {
       }
       for (const sessionEntry of sessionEntries) {
         if (!sessionEntry.isDirectory()) continue
-        const dirPath = path.join(cwdDir, sessionEntry.name)
-        try {
-          const stat = await fsp.stat(dirPath)
-          const meta = sessionMetaFromDir(cwdEntry.name, sessionEntry.name, dirPath, stat)
-          meta.running = await isRunning(dirPath)
-          out.push(meta)
-        } catch {
-          /* skip unreadable dir */
-        }
+        dirs.push({
+          cwdName: cwdEntry.name,
+          sessionId: sessionEntry.name,
+          dirPath: path.join(cwdDir, sessionEntry.name),
+        })
       }
     }
-    return enrichWithService(out)
+
+    const rows = await mapLimit(dirs, 16, async (entry) => {
+      try {
+        const stat = await fsp.stat(entry.dirPath)
+        let dataStat = null
+        try {
+          dataStat = await fsp.stat(path.join(entry.dirPath, 'session.v4.jsonl.zstd'))
+        } catch {
+          dataStat = null
+        }
+        const extra =
+          dataStat === null
+            ? null
+            : Object.assign({}, await readSessionMeta(entry.dirPath, dataStat), { sizeBytes: dataStat.size })
+        const meta = sessionMetaFromDir(entry.cwdName, entry.sessionId, entry.dirPath, stat, extra)
+        meta.running = await isRunning(entry.dirPath)
+        return meta
+      } catch {
+        return null // skip unreadable dir
+      }
+    })
+
+    return enrichWithService(rows.filter((row) => row !== null))
   }
 
   async function enumerateArchived() {
@@ -352,6 +558,7 @@ function createStore(ctx) {
       id: entry.id,
       cwd: entry.cwd ?? '',
       cwdEncoded: entry.cwdEncoded ?? '',
+      title: entry.title ?? '',
       updatedAt: entry.archivedAt ?? '',
       sizeBytes: entry.sizeBytes ?? 0,
       running: false,
@@ -385,20 +592,38 @@ function createStore(ctx) {
         const root = sessionsRoot()
         assertInside(root, dir)
         const rel = path.relative(root, dir)
+
+        // Capture title + real cwd before the move (the path changes after).
+        let extra = null
+        try {
+          const dataStat = await fsp.stat(path.join(dir, 'session.v4.jsonl.zstd'))
+          extra = await readSessionMeta(dir, dataStat)
+        } catch {
+          extra = null
+        }
+
         const target = path.join(archiveRoot(), rel)
         await fsp.mkdir(path.dirname(target), { recursive: true })
         // Same-volume rename is atomic; data file is preserved verbatim.
         await fsp.rename(dir, target)
+        metaCache.delete(dir)
 
         // Record an index entry (source path encoded for restore).
         const stat = await safeStatDir(target)
+        let dataSize = 0
+        try {
+          dataSize = (await fsp.stat(path.join(target, 'session.v4.jsonl.zstd'))).size
+        } catch {
+          dataSize = 0
+        }
         const entries = await readArchiveIndex()
         entries.push({
           id,
-          cwd: decodeCwd(path.dirname(rel)),
+          title: extra?.title ?? '',
+          cwd: extra?.cwd || decodeCwd(path.dirname(rel)),
           cwdEncoded: path.dirname(rel),
           archivedAt: nowIso(),
-          sizeBytes: stat?.size ?? 0,
+          sizeBytes: dataSize || stat?.size || 0,
           reason: 'manual',
         })
         await writeArchiveIndex(entries)
@@ -528,7 +753,10 @@ function sessionManagerListTool(store) {
         archivedCount: state.archivedCount,
         sessions: state.sessions.map((s) => ({
           id: s.id,
+          title: s.title,
           cwd: s.cwd,
+          createdAt: s.createdAt,
+          origin: s.origin,
           updatedAt: s.updatedAt,
           running: s.running,
           sizeBytes: s.sizeBytes,

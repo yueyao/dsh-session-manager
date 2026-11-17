@@ -27,5 +27,11 @@
   "size": "大小",
   "cwd": "工作目录",
   "total": "共 N 个会话",
-  "archivedCount": "M 个已归档"
+  "archivedCount": "M 个已归档",
+  "untitled": "未命名会话",
+  "searchPlaceholder": "搜索标题 / 路径…",
+  "noMatch": "没有匹配的会话",
+  "showSub": "显示子会话",
+  "mainOnly": "仅主会话",
+  "subagent": "子会话"
 }

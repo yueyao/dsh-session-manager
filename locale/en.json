@@ -27,5 +27,11 @@
   "size": "Size",
   "cwd": "Working dir",
   "total": "N sessions",
-  "archivedCount": "M archived"
+  "archivedCount": "M archived",
+  "untitled": "Untitled session",
+  "searchPlaceholder": "Search title / path…",
+  "noMatch": "No matching sessions",
+  "showSub": "Show subagent sessions",
+  "mainOnly": "Main only",
+  "subagent": "subagent"
 }
