@@ -129,12 +129,13 @@ window.__ModuleLoader__.load({
     }
 
     function shortId(id) {
-      return id && id.length > 10 ? id.slice(0, 10) + '…' : id || '—';
+      const bare = String(id || '').replace(/^session-/, '');
+      return bare.length > 8 ? bare.slice(0, 8) + '…' : bare || '—';
     }
 
     function interp(text, vars) {
       let out = text;
-      for (const k of Object.keys(vars)) out = out.split('N').join(String(vars[k]));
+      for (const k of Object.keys(vars)) out = out.replace(new RegExp('\\b' + k + '\\b', 'g'), String(vars[k]));
       return out;
     }
 
