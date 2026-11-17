@@ -1,0 +1,35 @@
+{
+  "name": "dsh-session-manager",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Batch browse, archive and delete DSH history sessions from a sidebar panel.",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./assets/icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "assets/icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yueyao/dsh-session-manager.git"
+  },
+  "license": "MIT"
+}
